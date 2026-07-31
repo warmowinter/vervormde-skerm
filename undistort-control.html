@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>桌面反畸变控制台</title>
+    <link rel="stylesheet" href="undistort-control.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <div>
+          <p class="eyebrow">DESKTOP UNDISTORT</p>
+          <h1>桌面反畸变</h1>
+        </div>
+        <span id="status" class="status bypass">安全旁路</span>
+      </header>
+
+      <section class="safety-card">
+        <strong>退出保护已启用</strong>
+        <span>ESC 紧急退出 · 关闭本窗口也会退出</span>
+      </section>
+
+      <button id="toggle" class="button primary" data-command="toggle">
+        启用反畸变
+      </button>
+
+      <section class="parameter-card">
+        <div class="parameter-heading">
+          <div>
+            <strong>主曲率</strong>
+            <small>控制整体桶形/枕形</small>
+          </div>
+          <output id="k1">+0.000</output>
+        </div>
+        <div class="stepper">
+          <button class="button" data-command="k1-down">−</button>
+          <button class="button" data-command="k1-up">＋</button>
+        </div>
+      </section>
+
+      <section class="parameter-card">
+        <div class="parameter-heading">
+          <div>
+            <strong>边角曲率</strong>
+            <small>单独修正最外侧四角</small>
+          </div>
+          <output id="k2">+0.000</output>
+        </div>
+        <div class="stepper">
+          <button class="button" data-command="k2-down">−</button>
+          <button class="button" data-command="k2-up">＋</button>
+        </div>
+      </section>
+
+      <section class="parameter-card">
+        <div class="parameter-heading">
+          <div>
+            <strong>画面缩放</strong>
+            <small>处理黑边或边缘裁切</small>
+          </div>
+          <output id="zoom">1.00×</output>
+        </div>
+        <div class="stepper">
+          <button class="button" data-command="zoom-down">−</button>
+          <button class="button" data-command="zoom-up">＋</button>
+        </div>
+      </section>
+
+      <section class="parameter-card center-card">
+        <div class="parameter-heading">
+          <div>
+            <strong>畸变中心</strong>
+            <small>镜面不对称时微调</small>
+          </div>
+          <output id="center">0.50, 0.50</output>
+        </div>
+        <div class="dpad" aria-label="移动畸变中心">
+          <button class="button up" data-command="center-up">↑</button>
+          <button class="button left" data-command="center-left">←</button>
+          <button class="button middle" disabled>●</button>
+          <button class="button right" data-command="center-right">→</button>
+          <button class="button down" data-command="center-down">↓</button>
+        </div>
+      </section>
+
+      <div class="action-grid">
+        <button id="grid" class="button" data-command="toggle-grid">隐藏网格</button>
+        <button class="button" data-command="save">保存参数</button>
+        <button class="button" data-command="reset">重置并旁路</button>
+        <button class="button" data-command="help">快捷键帮助</button>
+      </div>
+
+      <button class="button danger" data-command="exit">立即安全退出</button>
+    </main>
+    <script src="undistort-control.js"></script>
+  </body>
+</html>

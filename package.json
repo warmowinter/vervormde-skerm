@@ -1,0 +1,22 @@
+{
+  "name": "desktop-black-hole",
+  "version": "1.0.0",
+  "private": true,
+  "description": "A Windows desktop black-hole and mirror-undistortion overlay powered by WebGL.",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/warmowinter/vervormde-skerm.git"
+  },
+  "main": "main.js",
+  "scripts": {
+    "start": "electron .",
+    "undistort": "electron . --undistort",
+    "smoke": "electron . --smoke-test",
+    "smoke:undistort": "electron . --undistort --smoke-test",
+    "check": "node --check main.js && node --check preload.js && node --check renderer.js && node --check undistort-renderer.js && node --check undistort-control.js"
+  },
+  "devDependencies": {
+    "electron": "43.2.0"
+  }
+}

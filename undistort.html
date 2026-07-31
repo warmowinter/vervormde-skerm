@@ -1,0 +1,19 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; media-src blob:; connect-src 'self'"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>桌面反畸变标定</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <canvas id="effect" aria-label="桌面反畸变画面"></canvas>
+    <div id="hud" class="calibration-hud" role="status" aria-live="polite"></div>
+    <div id="safety-badge">ESC 紧急退出 · Ctrl+Alt+B 旁路</div>
+    <script src="undistort-renderer.js"></script>
+  </body>
+</html>
