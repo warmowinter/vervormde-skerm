@@ -1,5 +1,17 @@
 # 桌面黑洞
 
+## 推荐：原生 DirectX 长期版本
+
+`native/` 中提供了不依赖 Electron、Node.js 或 WebView 的 Win32 + Direct3D 11 实现。它通过 DXGI Desktop Duplication 在 GPU 内取得桌面纹理，并直接执行 HLSL 反畸变；默认 30 FPS，画面无变化时跳过着色和 Present。
+
+原生版本保留启动旁路、可见控制按钮、Esc/备用全局退出热键、系统托盘、15 分钟安全旁路以及独立进程看门狗。构建方法和架构说明见 [`native/README.md`](native/README.md)。
+
+```powershell
+npm.cmd run dist:native
+```
+
+下面的 Electron 版本继续保留，便于兼容和对照测试。
+
 这是一个 Windows 桌面特效：透明覆盖层实时捕获当前显示器，将捕获画面送进 WebGL 着色器，只在黑洞附近重映射屏幕像素。它会扭曲桌面、资源管理器、浏览器、视频等实际显示内容，不是普通网页背景。
 
 ## 运行
