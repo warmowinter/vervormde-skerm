@@ -18,7 +18,9 @@ app.commandLine.appendSwitch("disable-renderer-backgrounding");
 app.commandLine.appendSwitch("disable-backgrounding-occluded-windows");
 
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
-const isUndistortMode = process.argv.includes("--undistort");
+const isUndistortMode =
+  process.argv.includes("--undistort") ||
+  (app.isPackaged && !process.argv.includes("--black-hole"));
 const isSmokeTest = process.argv.includes("--smoke-test");
 const modeLabel = isUndistortMode ? "桌面反畸变" : "桌面黑洞";
 const SAFETY_TIMEOUT_MS = 15 * 60 * 1000;
@@ -328,7 +330,7 @@ function createOverlay() {
       nodeIntegration: false,
       sandbox: true,
       backgroundThrottling: false,
-      devTools: true,
+      devTools: !app.isPackaged,
     },
   });
   smokeLog(`overlay created on display ${display.id}`);
@@ -389,7 +391,7 @@ function createControlPanel() {
       nodeIntegration: false,
       sandbox: true,
       backgroundThrottling: false,
-      devTools: true,
+      devTools: !app.isPackaged,
     },
   });
 
