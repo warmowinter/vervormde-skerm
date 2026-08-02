@@ -1,5 +1,7 @@
 # Vervormde Skerm Native
 
+作者：**syh**（GitHub：`warmowinter`）
+
 这是长期维护的低负载版本，采用 Win32、Desktop Duplication、Direct3D 11 和 HLSL，运行时不依赖 Electron、Node.js 或 WebView。
 
 ## 数据路径

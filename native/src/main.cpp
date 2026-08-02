@@ -689,7 +689,7 @@ void CreatePanelControls() {
 
   AddControl(
     L"STATIC",
-    L"安全退出：Esc\r\n备用退出：Ctrl + Shift + Alt + F12\r\n启用/旁路：Ctrl + Alt + B\r\n覆盖层鼠标穿透；显示模式变化或渲染失联会自动旁路。",
+    L"作者：syh · 安全退出：Esc\r\n备用退出：Ctrl + Shift + Alt + F12\r\n启用/旁路：Ctrl + Alt + B\r\n覆盖层鼠标穿透；显示模式变化或渲染失联会自动旁路。",
     SS_LEFT, 20, 515, 390, 78, 0);
   AddControl(L"BUTTON", L"立即安全退出", BS_PUSHBUTTON, 20, 603, 390, 40, IDC_EXIT);
 }

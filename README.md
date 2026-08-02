@@ -1,5 +1,7 @@
 # 桌面黑洞
 
+作者：**syh**（GitHub：`warmowinter`）
+
 ## 推荐：原生 DirectX 长期版本
 
 `native/` 中提供了不依赖 Electron、Node.js 或 WebView 的 Win32 + Direct3D 11 实现。它通过 DXGI Desktop Duplication 在 GPU 内取得桌面纹理，并直接执行 HLSL 反畸变；默认 30 FPS，画面无变化时跳过着色和 Present。
