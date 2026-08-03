@@ -1,4 +1,5 @@
 #include <windows.h>
+#include <magnification.h>
 #include <shellapi.h>
 #include <shlobj.h>
 #include <d3d11.h>
@@ -24,6 +25,10 @@ using Microsoft::WRL::ComPtr;
 
 #ifndef WDA_EXCLUDEFROMCAPTURE
 #define WDA_EXCLUDEFROMCAPTURE 0x00000011
+#endif
+
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
 #endif
 
 namespace {
@@ -92,12 +97,24 @@ struct alignas(16) ShaderParams {
   float grid = 1.0f;
   float rotation = 0.0f;
   float padding[3]{};
+  float cursorTopLeft[2]{};
+  float cursorSize[2]{1.0f, 1.0f};
+  float cursorVisible = 0.0f;
+  float cursorPadding[3]{};
 };
 
 struct alignas(8) WatchdogShared {
   volatile LONG enabled = 0;
   volatile LONG shutdown = 0;
+  volatile LONG cursorHidden = 0;
+  volatile LONG cursorHideRequested = 0;
   volatile LONG64 heartbeat = 0;
+};
+
+struct CursorSnapshot {
+  POINT position{};
+  HCURSOR handle = nullptr;
+  bool intendedVisible = false;
 };
 
 struct RuntimeMetrics {
@@ -120,6 +137,7 @@ bool gQuitting = false;
 bool gNeedsRedraw = true;
 bool gPendingOverlayShow = false;
 bool gSmokeTest = false;
+bool gSmokeTest60 = false;
 bool gWatchdogTest = false;
 int gExitCode = 0;
 ULONGLONG gSafetyDeadline = 0;
@@ -131,6 +149,139 @@ HANDLE gWatchdogMapping = nullptr;
 HANDLE gWatchdogProcess = nullptr;
 WatchdogShared* gWatchdogState = nullptr;
 HHOOK gKeyboardHook = nullptr;
+bool gMagnificationReady = false;
+bool gSystemCursorHidden = false;
+bool gProxyCursorEverHidden = false;
+
+class FrameClock {
+ public:
+  FrameClock() {
+    QueryPerformanceFrequency(&frequency_);
+    timer_ = CreateWaitableTimerExW(
+      nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+    if (!timer_) timer_ = CreateWaitableTimerW(nullptr, FALSE, nullptr);
+  }
+
+  ~FrameClock() {
+    if (timer_) CloseHandle(timer_);
+  }
+
+  LONGLONG Now() const {
+    LARGE_INTEGER value{};
+    QueryPerformanceCounter(&value);
+    return value.QuadPart;
+  }
+
+  LONGLONG IntervalForRate(int framesPerSecond) const {
+    return std::max<LONGLONG>(
+      1, frequency_.QuadPart / std::max(1, framesPerSecond));
+  }
+
+  void AdvanceDeadline(LONGLONG& deadline, int framesPerSecond, LONGLONG now) const {
+    const LONGLONG interval = IntervalForRate(framesPerSecond);
+    if (deadline <= 0 || now - deadline > interval * 4) {
+      deadline = now + interval;
+      return;
+    }
+    do {
+      deadline += interval;
+    } while (deadline <= now);
+  }
+
+  void WaitUntil(LONGLONG deadline) const {
+    const LONGLONG now = Now();
+    if (deadline <= now) return;
+    const LONGLONG remaining = deadline - now;
+
+    if (timer_ && frequency_.QuadPart > 0) {
+      const LONGLONG hundredNanoseconds = std::max<LONGLONG>(
+        1, (remaining * 10000000LL + frequency_.QuadPart - 1) / frequency_.QuadPart);
+      LARGE_INTEGER dueTime{};
+      dueTime.QuadPart = -hundredNanoseconds;
+      if (SetWaitableTimer(timer_, &dueTime, 0, nullptr, nullptr, FALSE)) {
+        HANDLE handles[] = {timer_};
+        MsgWaitForMultipleObjectsEx(
+          1, handles, INFINITE, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        return;
+      }
+    }
+
+    const DWORD waitMs = frequency_.QuadPart > 0
+      ? static_cast<DWORD>(std::max<LONGLONG>(
+          1, (remaining * 1000LL + frequency_.QuadPart - 1) / frequency_.QuadPart))
+      : 1;
+    MsgWaitForMultipleObjectsEx(
+      0, nullptr, waitMs, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+  }
+
+ private:
+  LARGE_INTEGER frequency_{};
+  HANDLE timer_ = nullptr;
+};
+
+void SetSharedCursorHidden(bool hidden) {
+  if (gWatchdogState) {
+    InterlockedExchange(&gWatchdogState->cursorHidden, hidden ? 1 : 0);
+  }
+}
+
+void SetSharedCursorHideRequested(bool requested) {
+  if (gWatchdogState) {
+    InterlockedExchange(&gWatchdogState->cursorHideRequested, requested ? 1 : 0);
+  }
+}
+
+bool SetSystemCursorHidden(bool hidden) {
+  SetSharedCursorHideRequested(hidden);
+  if (hidden == gSystemCursorHidden) return true;
+  if (!gMagnificationReady) return !hidden;
+  // Mark a pending hide pessimistically before calling into Magnification.dll.
+  // If the process is killed in the few instructions after the API succeeds,
+  // the watchdog will still know that it must restore the global cursor.
+  if (hidden) SetSharedCursorHidden(true);
+  if (!MagShowSystemCursor(hidden ? FALSE : TRUE)) {
+    if (hidden) SetSharedCursorHidden(false);
+    return false;
+  }
+  gSystemCursorHidden = hidden;
+  if (hidden) gProxyCursorEverHidden = true;
+  SetSharedCursorHidden(hidden);
+  return true;
+}
+
+void RestoreSystemCursor() {
+  SetSharedCursorHideRequested(false);
+  if (!gSystemCursorHidden) {
+    SetSharedCursorHidden(false);
+    return;
+  }
+  if (gMagnificationReady && MagShowSystemCursor(TRUE)) {
+    gSystemCursorHidden = false;
+    SetSharedCursorHidden(false);
+  }
+}
+
+CursorSnapshot ReadCursorSnapshot() {
+  CursorSnapshot snapshot{};
+  CURSORINFO info{};
+  info.cbSize = sizeof(info);
+  if (GetCursorInfo(&info)) {
+    snapshot.handle = info.hCursor;
+    snapshot.intendedVisible =
+      (info.flags & CURSOR_SHOWING) != 0 ||
+      (gSystemCursorHidden && (info.flags & CURSOR_SUPPRESSED) == 0);
+  }
+  if (!GetPhysicalCursorPos(&snapshot.position)) {
+    GetCursorPos(&snapshot.position);
+  }
+  return snapshot;
+}
+
+bool PointInVisibleWindow(HWND window, POINT point) {
+  if (!window || !IsWindowVisible(window) || IsIconic(window)) return false;
+  RECT bounds{};
+  return GetWindowRect(window, &bounds) && PtInRect(&bounds, point) != FALSE;
+}
 
 uint64_t FileTimeValue(const FILETIME& value) {
   ULARGE_INTEGER converted{};
@@ -263,6 +414,13 @@ class Renderer {
     }
     if (FAILED(hr)) return Fail(L"无法创建 Direct3D 11 设备", hr);
 
+    // Keep the DWM presentation queue short. Frame pacing is handled by the
+    // high-resolution application clock below, so queued frames only add lag.
+    ComPtr<IDXGIDevice1> dxgiDevice;
+    if (SUCCEEDED(device_.As(&dxgiDevice))) {
+      dxgiDevice->SetMaximumFrameLatency(1);
+    }
+
     hr = output_.As(&output1_);
     if (FAILED(hr)) return Fail(L"显示器不支持 Desktop Duplication", hr);
     if (!CreateDuplication()) return false;
@@ -313,8 +471,106 @@ class Renderer {
     viewport_.Height = static_cast<float>(height);
     viewport_.MinDepth = 0.0f;
     viewport_.MaxDepth = 1.0f;
+    PrepareCursor(LoadCursorW(nullptr, IDC_ARROW));
     return true;
   }
+
+  bool PrepareCursor(HCURSOR cursor) {
+    if (!cursor) return cursorView_ != nullptr;
+    if (cursor == cursorHandle_ && cursorView_) return true;
+
+    ICONINFO iconInfo{};
+    if (!GetIconInfo(cursor, &iconInfo)) return false;
+
+    BITMAP bitmap{};
+    HBITMAP dimensionsBitmap = iconInfo.hbmColor ? iconInfo.hbmColor : iconInfo.hbmMask;
+    const bool hasDimensions =
+      dimensionsBitmap && GetObjectW(dimensionsBitmap, sizeof(bitmap), &bitmap) == sizeof(bitmap);
+    int cursorWidth = hasDimensions ? bitmap.bmWidth : 0;
+    int cursorHeight = hasDimensions ? std::abs(bitmap.bmHeight) : 0;
+    if (!iconInfo.hbmColor) cursorHeight /= 2;
+
+    bool created = false;
+    if (cursorWidth > 0 && cursorHeight > 0 && cursorWidth <= 512 && cursorHeight <= 512) {
+      std::vector<uint32_t> onBlack;
+      std::vector<uint32_t> onWhite;
+      if (RenderCursorAgainstBackground(cursor, cursorWidth, cursorHeight, 0x00000000U, onBlack) &&
+          RenderCursorAgainstBackground(cursor, cursorWidth, cursorHeight, 0x00FFFFFFU, onWhite)) {
+        std::vector<uint32_t> pixels(static_cast<size_t>(cursorWidth) * cursorHeight);
+        for (size_t index = 0; index < pixels.size(); ++index) {
+          const uint32_t black = onBlack[index];
+          const uint32_t white = onWhite[index];
+          const int blackB = static_cast<int>(black & 0xFFU);
+          const int blackG = static_cast<int>((black >> 8U) & 0xFFU);
+          const int blackR = static_cast<int>((black >> 16U) & 0xFFU);
+          const int whiteB = static_cast<int>(white & 0xFFU);
+          const int whiteG = static_cast<int>((white >> 8U) & 0xFFU);
+          const int whiteR = static_cast<int>((white >> 16U) & 0xFFU);
+          const int transparency = std::clamp(
+            std::max({whiteB - blackB, whiteG - blackG, whiteR - blackR}), 0, 255);
+          const int alpha = 255 - transparency;
+          const auto unpremultiply = [alpha](int channel) -> uint32_t {
+            if (alpha <= 0) return 0;
+            return static_cast<uint32_t>(std::clamp((channel * 255 + alpha / 2) / alpha, 0, 255));
+          };
+          const uint32_t blue = unpremultiply(blackB);
+          const uint32_t green = unpremultiply(blackG);
+          const uint32_t red = unpremultiply(blackR);
+          pixels[index] = blue | (green << 8U) | (red << 16U) |
+                          (static_cast<uint32_t>(alpha) << 24U);
+        }
+
+        D3D11_TEXTURE2D_DESC textureDesc{};
+        textureDesc.Width = static_cast<UINT>(cursorWidth);
+        textureDesc.Height = static_cast<UINT>(cursorHeight);
+        textureDesc.MipLevels = 1;
+        textureDesc.ArraySize = 1;
+        textureDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        textureDesc.SampleDesc.Count = 1;
+        textureDesc.Usage = D3D11_USAGE_IMMUTABLE;
+        textureDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        D3D11_SUBRESOURCE_DATA initialData{};
+        initialData.pSysMem = pixels.data();
+        initialData.SysMemPitch = static_cast<UINT>(cursorWidth * sizeof(uint32_t));
+
+        ComPtr<ID3D11Texture2D> texture;
+        ComPtr<ID3D11ShaderResourceView> view;
+        HRESULT hr = device_->CreateTexture2D(&textureDesc, &initialData, &texture);
+        if (SUCCEEDED(hr)) hr = device_->CreateShaderResourceView(texture.Get(), nullptr, &view);
+        if (SUCCEEDED(hr)) {
+          cursorTexture_ = texture;
+          cursorView_ = view;
+          cursorHandle_ = cursor;
+          cursorWidth_ = cursorWidth;
+          cursorHeight_ = cursorHeight;
+          cursorHotspotX_ = static_cast<int>(iconInfo.xHotspot);
+          cursorHotspotY_ = static_cast<int>(iconInfo.yHotspot);
+          created = true;
+        }
+      }
+    }
+
+    if (iconInfo.hbmColor) DeleteObject(iconInfo.hbmColor);
+    if (iconInfo.hbmMask) DeleteObject(iconInfo.hbmMask);
+    return created;
+  }
+
+  bool SetCursorState(POINT screenPosition, const RECT& monitorRect, bool visible) {
+    const float left = static_cast<float>(
+      screenPosition.x - monitorRect.left - cursorHotspotX_);
+    const float top = static_cast<float>(
+      screenPosition.y - monitorRect.top - cursorHotspotY_);
+    const bool effectiveVisible = visible && cursorView_ != nullptr;
+    const bool changed =
+      cursorTopLeft_[0] != left || cursorTopLeft_[1] != top ||
+      cursorVisible_ != effectiveVisible;
+    cursorTopLeft_[0] = left;
+    cursorTopLeft_[1] = top;
+    cursorVisible_ = effectiveVisible;
+    return changed;
+  }
+
+  bool CursorReady() const { return cursorView_ != nullptr; }
 
   bool Tick(const Settings& settings, bool forceRedraw, bool& drewFrame) {
     drewFrame = false;
@@ -332,10 +588,15 @@ class Renderer {
     params.zoom = settings.zoom;
     params.grid = settings.grid ? 1.0f : 0.0f;
     params.rotation = rotation_;
+    params.cursorTopLeft[0] = cursorTopLeft_[0];
+    params.cursorTopLeft[1] = cursorTopLeft_[1];
+    params.cursorSize[0] = static_cast<float>(std::max(1, cursorWidth_));
+    params.cursorSize[1] = static_cast<float>(std::max(1, cursorHeight_));
+    params.cursorVisible = cursorVisible_ ? 1.0f : 0.0f;
     context_->UpdateSubresource(constantBuffer_.Get(), 0, nullptr, &params, 0, 0);
 
     ID3D11RenderTargetView* targets[] = {renderTarget_.Get()};
-    ID3D11ShaderResourceView* resources[] = {captureView_.Get()};
+    ID3D11ShaderResourceView* resources[] = {captureView_.Get(), cursorView_.Get()};
     ID3D11SamplerState* samplers[] = {sampler_.Get()};
     ID3D11Buffer* constants[] = {constantBuffer_.Get()};
     context_->OMSetRenderTargets(1, targets, nullptr);
@@ -344,14 +605,16 @@ class Renderer {
     context_->IASetInputLayout(nullptr);
     context_->VSSetShader(vertexShader_.Get(), nullptr, 0);
     context_->PSSetShader(pixelShader_.Get(), nullptr, 0);
-    context_->PSSetShaderResources(0, 1, resources);
+    context_->PSSetShaderResources(0, 2, resources);
     context_->PSSetSamplers(0, 1, samplers);
     context_->PSSetConstantBuffers(0, 1, constants);
     context_->Draw(3, 0);
 
-    const HRESULT presentResult = swapChain_->Present(1, 0);
-    ID3D11ShaderResourceView* empty[] = {nullptr};
-    context_->PSSetShaderResources(0, 1, empty);
+    // Windowed flip-model swap chains are still composed by DWM. SyncInterval
+    // zero avoids a second, implicit rate limiter on top of our own scheduler.
+    const HRESULT presentResult = swapChain_->Present(0, 0);
+    ID3D11ShaderResourceView* empty[] = {nullptr, nullptr};
+    context_->PSSetShaderResources(0, 2, empty);
     if (FAILED(presentResult)) return Fail(L"DirectX Present 失败", presentResult);
     ++framesRendered_;
     drewFrame = true;
@@ -362,6 +625,42 @@ class Renderer {
   uint64_t FramesRendered() const { return framesRendered_; }
 
  private:
+  static bool RenderCursorAgainstBackground(
+      HCURSOR cursor, int width, int height, uint32_t background,
+      std::vector<uint32_t>& pixels) {
+    HDC memoryDc = CreateCompatibleDC(nullptr);
+    if (!memoryDc) return false;
+
+    BITMAPINFO bitmapInfo{};
+    bitmapInfo.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bitmapInfo.bmiHeader.biWidth = width;
+    bitmapInfo.bmiHeader.biHeight = -height;
+    bitmapInfo.bmiHeader.biPlanes = 1;
+    bitmapInfo.bmiHeader.biBitCount = 32;
+    bitmapInfo.bmiHeader.biCompression = BI_RGB;
+    void* rawBits = nullptr;
+    HBITMAP dib = CreateDIBSection(memoryDc, &bitmapInfo, DIB_RGB_COLORS, &rawBits, nullptr, 0);
+    if (!dib || !rawBits) {
+      if (dib) DeleteObject(dib);
+      DeleteDC(memoryDc);
+      return false;
+    }
+
+    HGDIOBJ previous = SelectObject(memoryDc, dib);
+    auto* dibPixels = static_cast<uint32_t*>(rawBits);
+    std::fill_n(dibPixels, static_cast<size_t>(width) * height, background);
+    const bool drawn = DrawIconEx(
+      memoryDc, 0, 0, cursor, width, height, 0, nullptr, DI_NORMAL) != FALSE;
+    GdiFlush();
+    if (drawn) {
+      pixels.assign(dibPixels, dibPixels + static_cast<size_t>(width) * height);
+    }
+    SelectObject(memoryDc, previous);
+    DeleteObject(dib);
+    DeleteDC(memoryDc);
+    return drawn;
+  }
+
   bool CreateDuplication() {
     duplication_.Reset();
     const HRESULT hr = output1_->DuplicateOutput(device_.Get(), &duplication_);
@@ -431,9 +730,14 @@ class Renderer {
         float grid;
         float rotation;
         float3 padding;
+        float2 cursorTopLeft;
+        float2 cursorSize;
+        float cursorVisible;
+        float3 cursorPadding;
       };
 
       Texture2D desktopTexture : register(t0);
+      Texture2D cursorTexture : register(t1);
       SamplerState desktopSampler : register(s0);
 
       struct VertexOutput {
@@ -477,6 +781,18 @@ class Renderer {
         float3 gridColor = lerp(float3(0.10, 0.72, 1.0), float3(1.0, 0.34, 0.12), max(centerX, centerY));
         float calibrationLine = max(gridLine * 0.68, max(centerX, centerY));
         color = lerp(color, gridColor, calibrationLine * grid * inside);
+
+        // Compose the proxy pointer in source-desktop coordinates. Sampling it
+        // with sourceUv sends the pointer through exactly the same radial warp
+        // as the button or text beneath its logical Windows position.
+        float2 cursorUv = (sourceUv * resolution - cursorTopLeft) / max(cursorSize, 1.0);
+        [branch]
+        if (cursorVisible > 0.5 && inside > 0.5 &&
+            cursorUv.x >= 0.0 && cursorUv.x <= 1.0 &&
+            cursorUv.y >= 0.0 && cursorUv.y <= 1.0) {
+          float4 cursorColor = cursorTexture.Sample(desktopSampler, cursorUv);
+          color = lerp(color, cursorColor.rgb, cursorColor.a);
+        }
         return float4(color, 1.0);
       }
     )HLSL";
@@ -555,13 +871,47 @@ class Renderer {
   ComPtr<ID3D11RenderTargetView> renderTarget_;
   ComPtr<ID3D11Texture2D> captureTexture_;
   ComPtr<ID3D11ShaderResourceView> captureView_;
+  ComPtr<ID3D11Texture2D> cursorTexture_;
+  ComPtr<ID3D11ShaderResourceView> cursorView_;
   ComPtr<ID3D11VertexShader> vertexShader_;
   ComPtr<ID3D11PixelShader> pixelShader_;
   ComPtr<ID3D11Buffer> constantBuffer_;
   ComPtr<ID3D11SamplerState> sampler_;
+  HCURSOR cursorHandle_ = nullptr;
+  int cursorWidth_ = 1;
+  int cursorHeight_ = 1;
+  int cursorHotspotX_ = 0;
+  int cursorHotspotY_ = 0;
+  float cursorTopLeft_[2]{};
+  bool cursorVisible_ = false;
 };
 
 std::unique_ptr<Renderer> gRenderer;
+
+bool UpdateProxyCursor() {
+  if (!gRenderer) {
+    RestoreSystemCursor();
+    return false;
+  }
+
+  const CursorSnapshot snapshot = ReadCursorSnapshot();
+  const bool overActiveMonitor = PtInRect(&gMonitorRect, snapshot.position) != FALSE;
+  const bool overControlPanel = PointInVisibleWindow(gPanel, snapshot.position);
+  const bool requested =
+    gSettings.enabled && !gPendingOverlayShow && snapshot.intendedVisible &&
+    overActiveMonitor && !overControlPanel && gMagnificationReady;
+  const bool shapeReady = gRenderer->PrepareCursor(snapshot.handle);
+  const bool shouldHideRealCursor = requested && shapeReady;
+
+  bool proxyVisible = false;
+  if (shouldHideRealCursor) {
+    proxyVisible = SetSystemCursorHidden(true) && gSystemCursorHidden;
+  } else {
+    RestoreSystemCursor();
+  }
+  return gRenderer->SetCursorState(
+    snapshot.position, gMonitorRect, proxyVisible);
+}
 
 class MetricsSampler {
  public:
@@ -689,7 +1039,7 @@ void CreatePanelControls() {
 
   AddControl(
     L"STATIC",
-    L"作者：syh · 安全退出：Esc\r\n备用退出：Ctrl + Shift + Alt + F12\r\n启用/旁路：Ctrl + Alt + B\r\n覆盖层鼠标穿透；显示模式变化或渲染失联会自动旁路。",
+    L"作者：syh · 安全退出：Esc\r\n备用退出：Ctrl + Shift + Alt + F12\r\n启用/旁路：Ctrl + Alt + B\r\n代理光标随桌面校正；显示模式变化或渲染失联会自动恢复。",
     SS_LEFT, 20, 515, 390, 78, 0);
   AddControl(L"BUTTON", L"立即安全退出", BS_PUSHBUTTON, 20, 603, 390, 40, IDC_EXIT);
 }
@@ -712,6 +1062,7 @@ void SetEffectEnabled(bool enabled) {
     gPendingOverlayShow = true;
   } else {
     gPendingOverlayShow = false;
+    RestoreSystemCursor();
     if (gOverlay) ShowWindow(gOverlay, SW_HIDE);
   }
   UpdatePanelText();
@@ -722,6 +1073,7 @@ void RequestExit() {
   gQuitting = true;
   gSettings.enabled = false;
   SetWatchdogEnabled(false);
+  RestoreSystemCursor();
   if (gOverlay) ShowWindow(gOverlay, SW_HIDE);
   SaveSettings();
   gRunning = false;
@@ -779,6 +1131,7 @@ void ExecuteControl(int id) {
 }
 
 void ShowTrayMenu() {
+  RestoreSystemCursor();
   POINT cursor{};
   GetCursorPos(&cursor);
   HMENU menu = CreatePopupMenu();
@@ -800,6 +1153,7 @@ LRESULT CALLBACK OverlayWindowProc(HWND window, UINT message, WPARAM wParam, LPA
       if (gPanel) PostMessageW(gPanel, kBypassMessage, 0, 0);
       return 0;
     case WM_QUERYENDSESSION:
+      RestoreSystemCursor();
       ShowWindow(window, SW_HIDE);
       return TRUE;
     default:
@@ -848,6 +1202,7 @@ LRESULT CALLBACK PanelWindowProc(HWND window, UINT message, WPARAM wParam, LPARA
       if (wParam == PBT_APMSUSPEND) SetEffectEnabled(false);
       return TRUE;
     case WM_QUERYENDSESSION:
+      RestoreSystemCursor();
       if (gOverlay) ShowWindow(gOverlay, SW_HIDE);
       return TRUE;
     case WM_CLOSE:
@@ -896,11 +1251,16 @@ bool CreateWindows(HINSTANCE instance) {
   const int monitorHeight = gMonitorRect.bottom - gMonitorRect.top;
 
   gOverlay = CreateWindowExW(
-    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE | WS_EX_TRANSPARENT,
+    WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE |
+      WS_EX_LAYERED | WS_EX_TRANSPARENT,
     kOverlayClass, L"Vervormde Skerm Native Overlay", WS_POPUP,
     gMonitorRect.left, gMonitorRect.top, monitorWidth, monitorHeight,
     nullptr, nullptr, instance, nullptr);
   if (!gOverlay) return false;
+  // WS_EX_TRANSPARENT becomes a reliable cross-process mouse pass-through
+  // style when it is paired with WS_EX_LAYERED. Keep every rendered pixel
+  // opaque; the layered style is used for hit testing, not visual opacity.
+  if (!SetLayeredWindowAttributes(gOverlay, 0, 255, LWA_ALPHA)) return false;
   if (!ExcludeWindowFromCapture(gOverlay)) return false;
 
   constexpr int clientWidth = 430;
@@ -952,7 +1312,20 @@ void CleanupShell() {
   if (gTray.cbSize != 0) Shell_NotifyIconW(NIM_DELETE, &gTray);
 }
 
-int RunWatchdogChild(const wchar_t* mappingName, DWORD parentPid) {
+bool RestoreCursorFromWatchdog(WatchdogShared* state) {
+  if (!state || InterlockedCompareExchange(&state->cursorHidden, 0, 0) == 0) return true;
+  if (MagInitialize()) {
+    if (MagShowSystemCursor(TRUE)) {
+      InterlockedExchange(&state->cursorHidden, 0);
+      MagUninitialize();
+      return true;
+    }
+    MagUninitialize();
+  }
+  return false;
+}
+
+int RunWatchdogChild(const wchar_t* mappingName, DWORD parentPid, bool writeTestLog) {
   HANDLE mapping = OpenFileMappingW(FILE_MAP_READ | FILE_MAP_WRITE, FALSE, mappingName);
   if (!mapping) return 2;
   auto* state = static_cast<WatchdogShared*>(MapViewOfFile(mapping, FILE_MAP_READ | FILE_MAP_WRITE, 0, 0, sizeof(WatchdogShared)));
@@ -966,9 +1339,17 @@ int RunWatchdogChild(const wchar_t* mappingName, DWORD parentPid) {
 
   LONG64 lastHeartbeat = InterlockedCompareExchange64(&state->heartbeat, 0, 0);
   DWORD missed = 0;
+  bool forcedTermination = false;
+  bool cursorWasHidden = false;
   for (;;) {
     if (WaitForSingleObject(parent, 1000) == WAIT_OBJECT_0) break;
     if (InterlockedCompareExchange(&state->shutdown, 0, 0) != 0) break;
+    const LONG cursorHideRequested =
+      InterlockedCompareExchange(&state->cursorHideRequested, 0, 0);
+    const LONG cursorHidden = InterlockedCompareExchange(&state->cursorHidden, 0, 0);
+    if (!cursorHideRequested && cursorHidden) {
+      RestoreCursorFromWatchdog(state);
+    }
     const LONG enabled = InterlockedCompareExchange(&state->enabled, 0, 0);
     const LONG64 heartbeat = InterlockedCompareExchange64(&state->heartbeat, 0, 0);
     if (!enabled || heartbeat != lastHeartbeat) {
@@ -977,8 +1358,22 @@ int RunWatchdogChild(const wchar_t* mappingName, DWORD parentPid) {
       continue;
     }
     if (++missed >= kWatchdogMissLimit) {
+      cursorWasHidden = InterlockedCompareExchange(&state->cursorHidden, 0, 0) != 0;
       TerminateProcess(parent, 0xE001);
+      WaitForSingleObject(parent, 2500);
+      forcedTermination = true;
       break;
+    }
+  }
+  const bool cursorRestored = RestoreCursorFromWatchdog(state);
+  if (writeTestLog) {
+    wchar_t tempPath[MAX_PATH]{};
+    GetTempPathW(MAX_PATH, tempPath);
+    std::wofstream log(std::wstring(tempPath) + L"vervormde-skerm-native-watchdog.log", std::ios::trunc);
+    if (log) {
+      log << L"forced_termination=" << (forcedTermination ? L"true" : L"false") << L"\n";
+      log << L"cursor_was_hidden=" << (cursorWasHidden ? L"true" : L"false") << L"\n";
+      log << L"cursor_restored=" << (cursorRestored ? L"true" : L"false") << L"\n";
     }
   }
   CloseHandle(parent);
@@ -998,6 +1393,7 @@ bool StartWatchdog() {
 
   const std::wstring executable = GetExecutablePath();
   std::wstring command = L"\"" + executable + L"\" --watchdog \"" + mappingName + L"\" " + std::to_wstring(GetCurrentProcessId());
+  if (gWatchdogTest) command += L" --watchdog-test";
   STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process{};
@@ -1028,13 +1424,27 @@ void WriteSmokeLog(bool success) {
   std::wofstream log(gSmokeLogPath, std::ios::trunc);
   if (!log) return;
   const double mib = 1024.0 * 1024.0;
+  const POINT inputProbe{
+    gMonitorRect.left + (gMonitorRect.right - gMonitorRect.left) / 2,
+    gMonitorRect.top + (gMonitorRect.bottom - gMonitorRect.top) / 2};
+  const LONG_PTR overlayExStyle = gOverlay ? GetWindowLongPtrW(gOverlay, GWL_EXSTYLE) : 0;
+  const bool overlayLayered = (overlayExStyle & WS_EX_LAYERED) != 0;
+  const bool overlayTransparent = (overlayExStyle & WS_EX_TRANSPARENT) != 0;
+  const bool overlayHitTestSkipped = gOverlay && WindowFromPoint(inputProbe) != gOverlay;
   log << L"mode=native-directx\n";
+  log << L"fps_limit=" << gSettings.fpsLimit << L"\n";
   log << L"success=" << (success ? L"true" : L"false") << L"\n";
   log << L"frames=" << (gRenderer ? gRenderer->FramesRendered() : 0) << L"\n";
   log << L"fps=" << gMetrics.fps << L"\n";
   log << L"cpu_percent=" << gMetrics.cpuPercent << L"\n";
   log << L"working_set_mib=" << static_cast<double>(gMetrics.workingSet) / mib << L"\n";
   log << L"private_mib=" << static_cast<double>(gMetrics.privateBytes) / mib << L"\n";
+  log << L"proxy_cursor_ready=" << (gRenderer && gRenderer->CursorReady() ? L"true" : L"false") << L"\n";
+  log << L"proxy_cursor_ever_hidden=" << (gProxyCursorEverHidden ? L"true" : L"false") << L"\n";
+  log << L"system_cursor_hidden=" << (gSystemCursorHidden ? L"true" : L"false") << L"\n";
+  log << L"overlay_layered=" << (overlayLayered ? L"true" : L"false") << L"\n";
+  log << L"overlay_transparent=" << (overlayTransparent ? L"true" : L"false") << L"\n";
+  log << L"overlay_hit_test_skipped=" << (overlayHitTestSkipped ? L"true" : L"false") << L"\n";
   if (gRenderer && !gRenderer->LastError().empty()) log << L"error=" << gRenderer->LastError() << L"\n";
 }
 
@@ -1056,12 +1466,14 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
   if (argc >= 4 && _wcsicmp(argv[1], L"--watchdog") == 0) {
     const DWORD parentPid = wcstoul(argv[3], nullptr, 10);
-    const int result = RunWatchdogChild(argv[2], parentPid);
+    const bool writeTestLog = HasArgument(argc, argv, L"--watchdog-test");
+    const int result = RunWatchdogChild(argv[2], parentPid, writeTestLog);
     LocalFree(argv);
     CoUninitialize();
     return result;
   }
-  gSmokeTest = HasArgument(argc, argv, L"--smoke-test");
+  gSmokeTest60 = HasArgument(argc, argv, L"--smoke-test-60");
+  gSmokeTest = HasArgument(argc, argv, L"--smoke-test") || gSmokeTest60;
   gWatchdogTest = HasArgument(argc, argv, L"--watchdog-test");
   LocalFree(argv);
 
@@ -1072,6 +1484,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
     CoUninitialize();
     return 0;
   }
+
+  // Cursor hiding is optional: if the Magnification API is unavailable, the
+  // desktop effect still runs and leaves the real Windows pointer untouched.
+  gMagnificationReady = MagInitialize() != FALSE;
 
   const std::wstring dataDirectory = GetLocalDataDirectory();
   gSettingsPath = dataDirectory + L"\\settings.ini";
@@ -1119,7 +1535,7 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
   UpdatePanelText();
 
   if (gSmokeTest || gWatchdogTest) {
-    gSettings.fpsLimit = 30;
+    gSettings.fpsLimit = gSmokeTest60 ? 60 : 30;
     SetEffectEnabled(true);
   } else {
     ShowWindow(gPanel, SW_SHOWNORMAL);
@@ -1128,8 +1544,10 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
   {
     const ULONGLONG smokeDeadline = GetTickCount64() + 8000;
-    ULONGLONG nextFrame = GetTickCount64();
     ULONGLONG nextMetricSample = GetTickCount64() + 1000;
+    FrameClock frameClock;
+    LONGLONG nextDesktopFrame = frameClock.Now();
+    LONGLONG nextCursorPoll = nextDesktopFrame;
     MSG message{};
     while (gRunning) {
       if (gWatchdogState) InterlockedIncrement64(&gWatchdogState->heartbeat);
@@ -1144,14 +1562,32 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
       }
       if (!gRunning) break;
 
-      const ULONGLONG now = GetTickCount64();
-      if (gSettings.enabled && now >= gSafetyDeadline) {
+      const ULONGLONG nowMs = GetTickCount64();
+      if (gSettings.enabled && nowMs >= gSafetyDeadline) {
         SetEffectEnabled(false);
       }
 
-      if (gSettings.enabled && now >= nextFrame) {
+      const LONGLONG nowQpc = frameClock.Now();
+      bool desktopDue = false;
+      bool cursorChanged = false;
+      if (gSettings.enabled) {
+        const LONGLONG desktopInterval = frameClock.IntervalForRate(gSettings.fpsLimit);
+        const LONGLONG cursorInterval = frameClock.IntervalForRate(60);
+        if (nowQpc - nextDesktopFrame > desktopInterval * 4) nextDesktopFrame = nowQpc;
+        if (nowQpc - nextCursorPoll > cursorInterval * 4) nextCursorPoll = nowQpc;
+
+        desktopDue = nowQpc >= nextDesktopFrame;
+        if (nowQpc >= nextCursorPoll) {
+          cursorChanged = UpdateProxyCursor();
+          frameClock.AdvanceDeadline(nextCursorPoll, 60, frameClock.Now());
+        }
+      }
+
+      if (gSettings.enabled && (desktopDue || cursorChanged || gNeedsRedraw)) {
         bool drewFrame = false;
-        if (!gRenderer->Tick(gSettings, gNeedsRedraw, drewFrame)) {
+        const bool forceRedraw =
+          gNeedsRedraw || cursorChanged || (gSmokeTest && desktopDue);
+        if (!gRenderer->Tick(gSettings, forceRedraw, drewFrame)) {
           SetEffectEnabled(false);
           if (!gSmokeTest) {
             const std::wstring error = L"渲染失败，已自动切回安全旁路。\n\n" + gRenderer->LastError();
@@ -1169,40 +1605,42 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
             ExcludeWindowFromCapture(gOverlay);
             if (!gSmokeTest) SetWindowPos(gPanel, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
             gPendingOverlayShow = false;
-            // Release-only safety test: deliberately stop the parent heartbeat.
-            // The independent watchdog process must terminate us and Windows
-            // will remove the overlay without relying on this UI thread.
-            if (gWatchdogTest) Sleep(30000);
           }
+          // Release-only safety test: wait until the proxy cursor has replaced
+          // the real pointer, then deliberately stop the parent heartbeat. The
+          // watchdog must terminate us, remove the overlay, and restore it.
+          if (gWatchdogTest && gProxyCursorEverHidden) Sleep(30000);
         }
-        nextFrame = now + static_cast<ULONGLONG>(1000 / std::max(1, gSettings.fpsLimit));
+        if (desktopDue) {
+          frameClock.AdvanceDeadline(
+            nextDesktopFrame, gSettings.fpsLimit, frameClock.Now());
+        }
       }
 
-      if (now >= nextMetricSample) {
+      if (nowMs >= nextMetricSample) {
         gMetricsSampler.Sample(gRenderer->FramesRendered());
         UpdatePanelText();
-        nextMetricSample = now + 1000;
+        nextMetricSample = nowMs + 1000;
       }
 
-      if (gSmokeTest && now >= smokeDeadline) {
+      if (gSmokeTest && nowMs >= smokeDeadline) {
         gMetricsSampler.Sample(gRenderer->FramesRendered());
         const bool success = gExitCode == 0 && gRenderer->FramesRendered() > 0;
-        WriteSmokeLog(success);
         gExitCode = success ? 0 : 4;
         RequestExit();
+        WriteSmokeLog(success);
         break;
       }
 
-      const ULONGLONG afterWork = GetTickCount64();
-      ULONGLONG waitUntil = afterWork + 50;
-      if (gSettings.enabled) waitUntil = std::min(waitUntil, nextFrame);
-      if (gSmokeTest) waitUntil = std::min(waitUntil, smokeDeadline);
-      const DWORD waitMs = waitUntil > afterWork ? static_cast<DWORD>(std::min<ULONGLONG>(50, waitUntil - afterWork)) : 0;
-      MsgWaitForMultipleObjectsEx(0, nullptr, waitMs, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+      const LONGLONG waitDeadline = gSettings.enabled
+        ? std::min(nextDesktopFrame, nextCursorPoll)
+        : frameClock.Now() + frameClock.IntervalForRate(20);
+      frameClock.WaitUntil(waitDeadline);
     }
   }
 
 cleanup:
+  RestoreSystemCursor();
   if (gOverlay) ShowWindow(gOverlay, SW_HIDE);
   SetWatchdogEnabled(false);
   CleanupShell();
@@ -1213,6 +1651,10 @@ cleanup:
   if (gFont) DeleteObject(gFont);
   if (gPanelBrush) DeleteObject(gPanelBrush);
   if (gInstanceMutex) CloseHandle(gInstanceMutex);
+  if (gMagnificationReady) {
+    MagUninitialize();
+    gMagnificationReady = false;
+  }
   CoUninitialize();
   return gExitCode;
 }

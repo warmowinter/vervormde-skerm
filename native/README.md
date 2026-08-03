@@ -6,9 +6,11 @@
 
 ## 数据路径
 
-`DXGI Desktop Duplication -> D3D11 GPU texture copy -> HLSL radial pre-warp -> DXGI swap chain`
+`DXGI Desktop Duplication -> D3D11 GPU texture copy -> desktop + proxy cursor HLSL radial pre-warp -> DXGI swap chain`
 
-桌面帧不会回读到 CPU，也不会上传。默认限制为 30 FPS；桌面画面没有变化时不会重复执行像素着色和 Present。
+桌面帧不会回读到 CPU，也不会上传。桌面默认限制为 30 FPS；代理光标独立按 60 Hz 检查位置，只有移动时才触发额外重绘。桌面画面和光标都没有变化时不会重复执行像素着色和 Present。
+
+帧调度使用 `QueryPerformanceCounter` 和高精度 waitable timer。交换链使用 `SyncInterval=0` 向 DWM 提交，并把最大排队帧数限制为 1，避免垂直同步等待与程序限帧重复叠加。
 
 ## 安全设计
 
@@ -16,7 +18,9 @@
 - `Esc` 全局紧急退出；`Ctrl+Shift+Alt+F12` 为备用退出热键。
 - 控制面板和系统托盘都提供退出入口。
 - 覆盖层始终鼠标穿透，不会阻止操作真实桌面。
-- 独立看门狗进程在渲染主循环连续失联时终止主进程，让 Windows 立即移除覆盖层。
+- 启用代理光标时才隐藏真实系统光标；旁路、退出、离开当前显示器或进入控制面板时立即恢复。
+- 全屏 DirectX 覆盖层使用 `WS_EX_LAYERED | WS_EX_TRANSPARENT`，Windows 鼠标命中会跨进程跳过它并直接落到下方程序；只有独立控制面板接收点击。
+- 独立看门狗进程在渲染主循环连续失联时终止主进程，让 Windows 立即移除覆盖层，并在主进程来不及清理时恢复系统光标。
 - 睡眠、显示模式变化和会话结束时自动旁路。
 - 覆盖层与控制面板均从桌面捕获中排除，避免递归反馈。
 
@@ -29,6 +33,14 @@
 - 默认 30 FPS；可切换 60 FPS，但高分辨率显示器上的 GPU 负载会相应增加。
 - `Esc` 紧急退出，`Ctrl+Shift+Alt+F12` 备用退出，`Ctrl+Alt+B` 启用/旁路。
 - 参数保存在 `%LOCALAPPDATA%\VervormdeSkerm\settings.ini`，但每次启动仍强制从旁路开始。
+
+## 代理光标
+
+Windows 仍按照未变形桌面的真实坐标向目标程序发送鼠标输入。为了让视觉位置与点击位置一致，程序会在源桌面坐标中合成当前 Windows 光标，再让桌面内容和光标一起通过相同的径向 Shader。
+
+代理光标不会移动系统指针，也不会使用 `SendInput` 重新注入鼠标事件，因此不会改变目标程序焦点。程序通过 Windows Magnification API 临时隐藏真实光标，并通过 `GetCursorInfo` 获取当前光标形状和热点位置。若光标纹理准备或系统光标隐藏失败，程序会保留真实光标并停用代理光标，避免双光标或无光标状态。
+
+代理光标位置独立按 60 Hz 检查，即使桌面上限选择 30 FPS，鼠标移动也可以触发最高 60 FPS 的额外重绘。当前版本处理程序所在的单个显示器；鼠标移到其他显示器时使用正常的系统光标。
 
 ## 2026-08-02 性能基线
 

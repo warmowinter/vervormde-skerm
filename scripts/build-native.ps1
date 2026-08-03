@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "2.0.1"
+  [string]$Version = "2.1.0"
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,6 +52,7 @@ if (-not (Test-Path -LiteralPath $builtExe -PathType Leaf)) {
 New-Item -ItemType Directory -Path $portableRoot -Force | Out-Null
 Copy-Item -LiteralPath $builtExe -Destination (Join-Path $portableRoot "VervormdeSkermNative.exe")
 Copy-Item -LiteralPath (Join-Path $nativeRoot "README.md") -Destination (Join-Path $portableRoot "README.md")
+Copy-Item -LiteralPath (Join-Path $projectRoot "CHANGELOG.md") -Destination (Join-Path $portableRoot "CHANGELOG.md")
 Copy-Item -LiteralPath (Join-Path $projectRoot "AUTHORS.md") -Destination (Join-Path $portableRoot "AUTHORS.md")
 Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $portableRoot "LICENSE")
 
