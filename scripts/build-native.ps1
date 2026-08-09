@@ -10,6 +10,20 @@ function Stop-NativeBuild([string]$Message) {
   throw $Message
 }
 
+function Get-Sha256Hex([string]$Path) {
+  $stream = [IO.File]::OpenRead($Path)
+  try {
+    $algorithm = [Security.Cryptography.SHA256]::Create()
+    try {
+      return ([BitConverter]::ToString($algorithm.ComputeHash($stream))).Replace('-', '').ToLowerInvariant()
+    } finally {
+      $algorithm.Dispose()
+    }
+  } finally {
+    $stream.Dispose()
+  }
+}
+
 $projectRoot = (Resolve-Path -LiteralPath (Join-Path $PSScriptRoot "..")).Path
 $nativeRoot = Join-Path $projectRoot "native"
 $projectFile = Join-Path $nativeRoot "VervormdeSkermNative.vcxproj"
@@ -69,8 +83,8 @@ Copy-Item -LiteralPath (Join-Path $projectRoot "AUTHORS.md") -Destination (Join-
 Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $portableRoot "LICENSE")
 
 Compress-Archive -LiteralPath $portableRoot -DestinationPath $zipPath -CompressionLevel Optimal
-$zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-$standaloneHash = (Get-FileHash -LiteralPath $standaloneExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+$zipHash = Get-Sha256Hex $zipPath
+$standaloneHash = Get-Sha256Hex $standaloneExePath
 Set-Content -LiteralPath $zipHashPath -Value "$zipHash  $([IO.Path]::GetFileName($zipPath))" -Encoding Ascii
 Set-Content -LiteralPath $standaloneHashPath -Value "$standaloneHash  $([IO.Path]::GetFileName($standaloneExePath))" -Encoding Ascii
 
