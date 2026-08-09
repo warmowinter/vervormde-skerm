@@ -10,11 +10,11 @@ permissions:
 
 jobs:
   build-and-release:
-    runs-on: windows-latest
+    runs-on: windows-2022
 
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Verify tag matches package version
         shell: pwsh
@@ -27,7 +27,12 @@ jobs:
 
       - name: Build native release artifacts
         shell: pwsh
-        run: npm run dist:native
+        run: |
+          npm run dist:native
+          if ($LASTEXITCODE -ne 0) {
+            Write-Output "::error title=Native build failed::npm run dist:native exited with code $LASTEXITCODE on $env:ImageOS ($env:ImageVersion)."
+            exit $LASTEXITCODE
+          }
 
       - name: Create GitHub Release and upload binaries
         shell: pwsh

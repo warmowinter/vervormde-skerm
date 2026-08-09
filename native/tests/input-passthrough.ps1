@@ -88,7 +88,8 @@ public static class OverlayInputPassthroughProbe
                 Location = new Point(Screen.PrimaryScreen.WorkingArea.Left + 60,
                                      Screen.PrimaryScreen.WorkingArea.Top + 60),
                 ClientSize = new Size(340, 210),
-                ShowInTaskbar = false
+                ShowInTaskbar = false,
+                TopMost = true
             };
             var button = new Button
             {
