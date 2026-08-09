@@ -9,12 +9,12 @@
 
 程序不会修改桌面文件、应用窗口或 Windows 的输入系统。它取得当前显示器的画面，在 GPU 中重新排列像素，然后用一个置顶覆盖窗口显示处理后的结果。退出程序后，覆盖窗口消失，原桌面不会发生任何改变。
 
-## v2.1.2 本次更新
+## v2.1.3 本次更新
 
-- Release 页面提供 `VervormdeSkermNative-v2.1.2-win-x64.exe`，下载后可直接双击运行，不需要 Node.js、Electron 或 VC++ Redistributable。
+- Release 页面提供 `VervormdeSkermNative-v2.1.3-win-x64.exe`，下载后可直接双击运行，不需要 Node.js、Electron 或 VC++ Redistributable。
 - 同时提供包含 README、CHANGELOG 和许可证的便携 ZIP；不要下载 GitHub 自动生成的 `Source code` 压缩包。
 - 独立 EXE 与 ZIP 都有对应的 SHA-256 校验文件。
-- 发布流程固定使用 Windows Server 2022 + Visual Studio 2022/v143，并自动编译、创建 Release、上传真实程序。
+- 发布流程已在 GitHub 的 Windows Server 2022 + Visual Studio 2022/v143 runner 上实际通过，并自动创建 Release、上传真实程序。
 
 完整版本记录见 [`CHANGELOG.md`](CHANGELOG.md)。
 
