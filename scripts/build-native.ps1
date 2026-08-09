@@ -1,5 +1,5 @@
 param(
-  [string]$Version = "2.1.0"
+  [string]$Version = "2.1.1"
 )
 
 $ErrorActionPreference = "Stop"
@@ -11,7 +11,9 @@ $distRoot = Join-Path $nativeRoot "dist"
 $folderName = "Vervormde-Skerm-Native-v$Version-win-x64"
 $portableRoot = Join-Path $distRoot $folderName
 $zipPath = Join-Path $distRoot "$folderName.zip"
-$hashPath = "$zipPath.sha256"
+$zipHashPath = "$zipPath.sha256"
+$standaloneExePath = Join-Path $distRoot "VervormdeSkermNative-v$Version-win-x64.exe"
+$standaloneHashPath = "$standaloneExePath.sha256"
 
 $vswhere = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
 if (-not (Test-Path -LiteralPath $vswhere -PathType Leaf)) {
@@ -51,15 +53,20 @@ if (-not (Test-Path -LiteralPath $builtExe -PathType Leaf)) {
 
 New-Item -ItemType Directory -Path $portableRoot -Force | Out-Null
 Copy-Item -LiteralPath $builtExe -Destination (Join-Path $portableRoot "VervormdeSkermNative.exe")
+Copy-Item -LiteralPath $builtExe -Destination $standaloneExePath
 Copy-Item -LiteralPath (Join-Path $nativeRoot "README.md") -Destination (Join-Path $portableRoot "README.md")
 Copy-Item -LiteralPath (Join-Path $projectRoot "CHANGELOG.md") -Destination (Join-Path $portableRoot "CHANGELOG.md")
 Copy-Item -LiteralPath (Join-Path $projectRoot "AUTHORS.md") -Destination (Join-Path $portableRoot "AUTHORS.md")
 Copy-Item -LiteralPath (Join-Path $projectRoot "LICENSE") -Destination (Join-Path $portableRoot "LICENSE")
 
 Compress-Archive -LiteralPath $portableRoot -DestinationPath $zipPath -CompressionLevel Optimal
-$hash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-Set-Content -LiteralPath $hashPath -Value "$hash  $([IO.Path]::GetFileName($zipPath))" -Encoding Ascii
+$zipHash = (Get-FileHash -LiteralPath $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+$standaloneHash = (Get-FileHash -LiteralPath $standaloneExePath -Algorithm SHA256).Hash.ToLowerInvariant()
+Set-Content -LiteralPath $zipHashPath -Value "$zipHash  $([IO.Path]::GetFileName($zipPath))" -Encoding Ascii
+Set-Content -LiteralPath $standaloneHashPath -Value "$standaloneHash  $([IO.Path]::GetFileName($standaloneExePath))" -Encoding Ascii
 
-Write-Host "Native portable build created:"
+Write-Host "Native release artifacts created:"
+Write-Host "  $standaloneExePath"
+Write-Host "  $standaloneHashPath"
 Write-Host "  $zipPath"
-Write-Host "  $hashPath"
+Write-Host "  $zipHashPath"

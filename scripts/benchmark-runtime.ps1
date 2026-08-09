@@ -1,5 +1,5 @@
 param(
-  [string]$NativeExe = "native\dist\Vervormde-Skerm-Native-v2.1.0-win-x64\VervormdeSkermNative.exe",
+  [string]$NativeExe = "native\dist\Vervormde-Skerm-Native-v2.1.1-win-x64\VervormdeSkermNative.exe",
   [string]$ElectronExe = "dist-release\Vervormde-Skerm-v1.0.0-win-x64\VervormdeSkerm.exe"
 )
 
