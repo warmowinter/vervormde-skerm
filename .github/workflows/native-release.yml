@@ -31,10 +31,14 @@ jobs:
       - name: Build native release artifacts
         shell: pwsh
         run: |
-          npm run dist:native
-          if ($LASTEXITCODE -ne 0) {
-            Write-Output "::error title=Native build failed::npm run dist:native exited with code $LASTEXITCODE on $env:ImageOS ($env:ImageVersion)."
-            exit $LASTEXITCODE
+          $buildOutput = @(npm run dist:native 2>&1)
+          $buildExitCode = $LASTEXITCODE
+          $buildOutput | ForEach-Object { Write-Host $_ }
+          if ($buildExitCode -ne 0) {
+            $buildTail = ($buildOutput | Select-Object -Last 30 | ForEach-Object { $_.ToString() }) -join "`n"
+            $annotation = $buildTail.Replace('%', '%25').Replace("`r", '%0D').Replace("`n", '%0A')
+            Write-Output "::error title=Native build failed::$annotation"
+            exit $buildExitCode
           }
 
       - name: Create GitHub Release and upload binaries
