@@ -2,6 +2,8 @@ name: Native Windows release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - "v*"
 
@@ -16,7 +18,8 @@ jobs:
       - name: Check out tagged source
         uses: actions/checkout@v6
 
-      - name: Verify tag matches package version
+      - name: Verify release tag matches package version
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         run: |
           $version = (Get-Content package.json -Raw | ConvertFrom-Json).version
@@ -35,6 +38,7 @@ jobs:
           }
 
       - name: Create GitHub Release and upload binaries
+        if: startsWith(github.ref, 'refs/tags/v')
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
