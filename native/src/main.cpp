@@ -41,6 +41,10 @@ constexpr UINT kBypassMessage = WM_APP + 2;
 constexpr UINT_PTR kUiTimer = 1;
 constexpr DWORD kWatchdogMissLimit = 12;
 constexpr ULONGLONG kSafetyTimeoutMs = 15ULL * 60ULL * 1000ULL;
+constexpr int kPanelClientWidth = 430;
+constexpr int kPanelPreferredClientHeight = 660;
+constexpr int kPanelContentHeight = 710;
+constexpr int kPanelScrollLine = 42;
 
 enum ControlId : int {
   IDC_STATUS = 100,
@@ -66,6 +70,7 @@ enum ControlId : int {
   IDC_PRESET_PINCUSHION,
   IDC_SAVE,
   IDC_RESET,
+  IDC_MINIMIZE,
   IDC_EXIT,
   IDM_TRAY_SHOW = 300,
   IDM_TRAY_TOGGLE,
@@ -152,6 +157,8 @@ HHOOK gKeyboardHook = nullptr;
 bool gMagnificationReady = false;
 bool gSystemCursorHidden = false;
 bool gProxyCursorEverHidden = false;
+int gPanelScrollOffset = 0;
+int gPanelWheelRemainder = 0;
 
 class FrameClock {
  public:
@@ -1041,7 +1048,60 @@ void CreatePanelControls() {
     L"STATIC",
     L"作者：syh · 安全退出：Esc\r\n备用退出：Ctrl + Shift + Alt + F12\r\n启用/旁路：Ctrl + Alt + B\r\n代理光标随桌面校正；显示模式变化或渲染失联会自动恢复。",
     SS_LEFT, 20, 515, 390, 78, 0);
-  AddControl(L"BUTTON", L"立即安全退出", BS_PUSHBUTTON, 20, 603, 390, 40, IDC_EXIT);
+  AddControl(L"BUTTON", L"最小化窗口（反畸变继续）", BS_PUSHBUTTON, 20, 603, 390, 40, IDC_MINIMIZE);
+  AddControl(L"BUTTON", L"立即安全退出", BS_PUSHBUTTON, 20, 653, 390, 40, IDC_EXIT);
+}
+
+int PanelMaxScroll(HWND window) {
+  RECT client{};
+  if (!GetClientRect(window, &client)) return 0;
+  const int clientHeight = static_cast<int>(client.bottom - client.top);
+  return std::max(0, kPanelContentHeight - clientHeight);
+}
+
+void ScrollPanelTo(HWND window, int target) {
+  if (!window || IsIconic(window)) return;
+  const int next = std::clamp(target, 0, PanelMaxScroll(window));
+  const int childDelta = gPanelScrollOffset - next;
+  if (childDelta != 0) {
+    ScrollWindowEx(
+      window, 0, childDelta, nullptr, nullptr, nullptr, nullptr,
+      SW_SCROLLCHILDREN | SW_INVALIDATE | SW_ERASE);
+    gPanelScrollOffset = next;
+  }
+
+  RECT client{};
+  GetClientRect(window, &client);
+  SCROLLINFO info{};
+  info.cbSize = sizeof(info);
+  info.fMask = SIF_RANGE | SIF_PAGE | SIF_POS;
+  info.nMin = 0;
+  info.nMax = kPanelContentHeight - 1;
+  info.nPage = static_cast<UINT>(std::max(0L, client.bottom - client.top));
+  info.nPos = gPanelScrollOffset;
+  SetScrollInfo(window, SB_VERT, &info, TRUE);
+}
+
+void HandlePanelScroll(HWND window, int request) {
+  SCROLLINFO info{};
+  info.cbSize = sizeof(info);
+  info.fMask = SIF_ALL;
+  GetScrollInfo(window, SB_VERT, &info);
+
+  int target = gPanelScrollOffset;
+  const int page = static_cast<int>(std::max<UINT>(info.nPage, kPanelScrollLine));
+  switch (request) {
+    case SB_TOP: target = 0; break;
+    case SB_BOTTOM: target = PanelMaxScroll(window); break;
+    case SB_LINEUP: target -= kPanelScrollLine; break;
+    case SB_LINEDOWN: target += kPanelScrollLine; break;
+    case SB_PAGEUP: target -= page; break;
+    case SB_PAGEDOWN: target += page; break;
+    case SB_THUMBPOSITION:
+    case SB_THUMBTRACK: target = info.nTrackPos; break;
+    default: return;
+  }
+  ScrollPanelTo(window, target);
 }
 
 void ResetSafetyDeadline() {
@@ -1117,6 +1177,9 @@ void ExecuteControl(int id) {
       SetEffectEnabled(false);
       MarkParameterChanged();
       break;
+    case IDC_MINIMIZE:
+      ShowWindow(gPanel, SW_MINIMIZE);
+      break;
     case IDC_EXIT:
     case IDM_TRAY_EXIT:
       RequestExit();
@@ -1178,6 +1241,21 @@ LRESULT CALLBACK LowLevelKeyboardProc(int code, WPARAM wParam, LPARAM lParam) {
 
 LRESULT CALLBACK PanelWindowProc(HWND window, UINT message, WPARAM wParam, LPARAM lParam) {
   switch (message) {
+    case WM_SIZE:
+      if (wParam != SIZE_MINIMIZED) ScrollPanelTo(window, gPanelScrollOffset);
+      return 0;
+    case WM_VSCROLL:
+      HandlePanelScroll(window, LOWORD(wParam));
+      return 0;
+    case WM_MOUSEWHEEL: {
+      gPanelWheelRemainder += GET_WHEEL_DELTA_WPARAM(wParam);
+      const int notches = gPanelWheelRemainder / WHEEL_DELTA;
+      gPanelWheelRemainder %= WHEEL_DELTA;
+      if (notches != 0) {
+        ScrollPanelTo(window, gPanelScrollOffset - notches * kPanelScrollLine * 3);
+      }
+      return 0;
+    }
     case WM_COMMAND:
       if (HIWORD(wParam) == BN_CLICKED || HIWORD(wParam) == 0) ExecuteControl(LOWORD(wParam));
       return 0;
@@ -1263,21 +1341,25 @@ bool CreateWindows(HINSTANCE instance) {
   if (!SetLayeredWindowAttributes(gOverlay, 0, 255, LWA_ALPHA)) return false;
   if (!ExcludeWindowFromCapture(gOverlay)) return false;
 
-  constexpr int clientWidth = 430;
-  constexpr int clientHeight = 660;
-  RECT panelRect{0, 0, clientWidth, clientHeight};
-  AdjustWindowRectEx(&panelRect, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX, FALSE, WS_EX_TOPMOST | WS_EX_TOOLWINDOW);
+  constexpr DWORD panelStyle =
+    WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX | WS_VSCROLL;
+  constexpr DWORD panelExStyle = WS_EX_TOPMOST | WS_EX_APPWINDOW;
+  RECT panelRect{0, 0, kPanelClientWidth, kPanelPreferredClientHeight};
+  AdjustWindowRectEx(&panelRect, panelStyle, FALSE, panelExStyle);
   const int panelWidth = panelRect.right - panelRect.left;
-  const int panelHeight = panelRect.bottom - panelRect.top;
+  const int preferredPanelHeight = panelRect.bottom - panelRect.top;
+  const int workHeight = info.rcWork.bottom - info.rcWork.top;
+  const int panelHeight = std::min(preferredPanelHeight, std::max(240, workHeight - 36));
   const int panelX = std::max(info.rcWork.left + 12, info.rcWork.right - panelWidth - 18);
   const int panelY = info.rcWork.top + 18;
   gPanel = CreateWindowExW(
-    WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-    kPanelClass, kAppTitle, WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX,
+    panelExStyle,
+    kPanelClass, kAppTitle, panelStyle,
     panelX, panelY, panelWidth, panelHeight,
     nullptr, nullptr, instance, nullptr);
   if (!gPanel) return false;
   CreatePanelControls();
+  ScrollPanelTo(gPanel, 0);
   ExcludeWindowFromCapture(gPanel);
   return true;
 }
@@ -1479,7 +1561,12 @@ int WINAPI wWinMain(HINSTANCE instance, HINSTANCE, PWSTR, int) {
 
   gInstanceMutex = CreateMutexW(nullptr, FALSE, L"Local\\VervormdeSkermNative-SingleInstance");
   if (!gInstanceMutex || GetLastError() == ERROR_ALREADY_EXISTS) {
-    MessageBoxW(nullptr, L"Vervormde Skerm Native 已经在运行。请查看控制面板或系统托盘。", kAppTitle, MB_OK | MB_ICONINFORMATION);
+    if (HWND existingPanel = FindWindowW(kPanelClass, nullptr)) {
+      ShowWindow(existingPanel, SW_RESTORE);
+      SetForegroundWindow(existingPanel);
+    } else {
+      MessageBoxW(nullptr, L"Vervormde Skerm Native 已经在运行。请查看任务栏或系统托盘。", kAppTitle, MB_OK | MB_ICONINFORMATION);
+    }
     if (gInstanceMutex) CloseHandle(gInstanceMutex);
     CoUninitialize();
     return 0;

@@ -1,6 +1,6 @@
 {
   "name": "desktop-black-hole",
-  "version": "2.1.3",
+  "version": "2.2.0",
   "private": true,
   "description": "A native DirectX desktop-undistortion overlay with an Electron/WebGL compatibility implementation.",
   "license": "MIT",

@@ -31,6 +31,8 @@
 从 GitHub Release 下载时，选择 `VervormdeSkermNative-v*-win-x64.exe` 可直接运行，或选择 `Vervormde-Skerm-Native-v*-win-x64.zip` 解压后运行。不要选择 GitHub 自动生成的 `Source code` 文件，它只包含源码。
 
 - 点击“启用反畸变”后才显示桌面覆盖层。
+- 点击“最小化窗口（反畸变继续）”只会收起控制面板；可从任务栏、系统托盘或再次运行程序恢复。
+- 控制面板内容超出可见高度时，可拖动右侧滚动条或使用鼠标滚轮查看底部按钮。
 - 使用按钮调节 `k1`、`k2`、缩放、畸变中心和校准网格。
 - 默认 30 FPS；可切换 60 FPS，但高分辨率显示器上的 GPU 负载会相应增加。
 - `Esc` 紧急退出，`Ctrl+Shift+Alt+F12` 备用退出，`Ctrl+Alt+B` 启用/旁路。
